@@ -1,5 +1,5 @@
 # app/crud/jobs.py
-
+from pydantic import HttpUrl
 from sqlalchemy.orm import Session
 from app import models, schemas
 
@@ -13,12 +13,17 @@ def get_jobs(db: Session, skip: int = 0, limit: int = 100):
 
 
 def create_job(db: Session, job: schemas.job.JobCreate):
-    db_job = models.job.Job(**job.model_dump())
+    job_data = job.model_dump()
+
+    # Convert HttpUrl to string
+    if isinstance(job_data.get("job_url"), HttpUrl):
+        job_data["job_url"] = str(job_data["job_url"])
+
+    db_job = models.job.Job(**job_data)
     db.add(db_job)
     db.commit()
     db.refresh(db_job)
     return db_job
-
 
 def update_job(db: Session, job_id: int, job_update: schemas.job.JobUpdate):
     db_job = get_job(db, job_id)
