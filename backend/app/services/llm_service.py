@@ -1,5 +1,6 @@
 # app/services/llm_service.py
 import json
+from typing import List
 
 from openai import OpenAI
 from app.core.config import DEEPSEEK_API_KEY  # <-- Import the new key
@@ -50,3 +51,60 @@ def analyze_job_description(description: str):
     except Exception as e:
         print(f"An error occurred during LLM analysis: {e}")
         return None
+
+
+def extract_job_links_from_content(content: str) -> List[str]:
+    """
+    Extracts individual job posting URLs from the markdown of a search results page using an LLM.
+    """
+    if not GEMINI_API_KEY:
+        raise ValueError("Gemini API key is not set. Please set the 'GEMINI_API_KEY' environment variable.")
+
+    genai.configure(api_key=GEMINI_API_KEY)
+
+    # Use a fast and efficient model for this extraction task
+    model = genai.GenerativeModel(model_name="models/gemini-1.5-flash")
+
+    prompt = f"""
+    From the provided markdown content of a job search results page, extract all the unique, fully-qualified URLs
+    that lead to individual job postings.
+
+    Return the result ONLY as a JSON object with a single key "job_urls" which contains a list of the URLs.
+    Do not include any URLs that are for navigation, search filters, or company pages. Only include direct links to jobs.
+
+    Example output format:
+    {{
+      "job_urls": [
+        "https://www.example.com/jobs/view/12345",
+        "https://www.example.com/jobs/view/67890",
+        "https://www.another-site.com/careers/apply/abcde"
+      ]
+    }}
+
+    Markdown Content:
+    ---
+    {content}
+    ---
+    """
+
+    try:
+        response = model.generate_content(
+            contents=[{"role": "user", "parts": [{"text": prompt}]}],
+            generation_config=genai.types.GenerationConfig(
+                response_mime_type="application/json"
+            )
+        )
+        # The response should be a JSON string like: '{"job_urls": ["url1", "url2"]}'
+        result_data = json.loads(response.text)
+
+        # Validate the structure of the returned data
+        if isinstance(result_data, dict) and "job_urls" in result_data and isinstance(result_data["job_urls"], list):
+            return result_data["job_urls"]
+        else:
+            print("LLM for link extraction returned data in an unexpected format.")
+            return []  # Return empty list if format is wrong
+
+    except Exception as e:
+        print(f"An error occurred during job link extraction: {e}")
+        return []  # Return empty list on error
+

@@ -9,6 +9,8 @@ from app.schemas.job import Job, JobCreate, JobUpdate
 from app.core.db import get_db
 from app.services import scraper_service, llm_service
 from app.crud.jobs import create_job, get_job, get_jobs, update_job, delete_job
+from app.models.job import Job as DBJobModel
+
 
 class ScrapeRequest(BaseModel):
     job_url: HttpUrl
@@ -58,48 +60,73 @@ def delete_existing_job(job_id: int, db: Session = Depends(get_db)):
     return db_job
 
 
-@router.post("/scrape", response_model=Job, status_code=status.HTTP_201_CREATED)
-def scrape_analyze_and_create_job(request: ScrapeRequest, db: Session = Depends(get_db)):
+@router.post("/scrape_and_create_jobs_refined", response_model=List[Job], status_code=status.HTTP_201_CREATED)
+def scrape_analyze_and_create_jobs_refined(request: ScrapeRequest, db: Session = Depends(get_db)):
     """
-    Scrapes a job URL, analyzes it with an LLM, and creates a job entry.
+    Implements a robust three-step process:
+    1. Scrapes a job search results page to get its markdown.
+    2. Uses an LLM to extract only the individual job URLs from the markdown.
+    3. Batch-scrapes all individual job URLs for their content.
+    4. Analyzes each individual job's content with an LLM to get structured data.
+    5. Creates a database entry for each successfully analyzed job.
     """
-    # Step 1: Scrape the content
-    scraped_content = scraper_service.scrape_job_url(str(request.job_url))
-    if not scraped_content:
-        raise HTTPException(status_code=500, detail="Failed to scrape URL.")
+    # --- Step 1: Scrape the main search results page ---
+    search_page_content = scraper_service.scrape_job_url(str(request.job_url))
+    if not search_page_content:
+        raise HTTPException(status_code=500, detail="Failed to scrape the initial search URL.")
 
-    # Step 2: Analyze the content with the LLM
-    analysis_results = llm_service.analyze_job_description(scraped_content)
-    print("Gemini analysis results:", analysis_results)
-    print("Type:", type(analysis_results))
-    if not analysis_results:
-        raise HTTPException(status_code=500, detail="Failed to analyze job description.")
-    # Handle cases where analysis_results might be a list
-    if isinstance(analysis_results, list):
-        if analysis_results:
-            # If it's a list, take the first element as the primary analysis
-            # This assumes that even if multiple are returned, the first is the most relevant
-            final_analysis: Dict[str, Any] = analysis_results[0]
-        else:
-            raise HTTPException(status_code=500, detail="LLM analysis returned an empty list.")
-    elif isinstance(analysis_results, dict):
-        # If it's already a dictionary, use it directly
-        final_analysis: Dict[str, Any] = analysis_results
-    else:
-        raise HTTPException(status_code=500, detail="LLM analysis returned an unexpected type.")
+    # --- Step 2: Use LLM to extract only the job URLs ---
+    job_urls = llm_service.extract_job_links_from_content(search_page_content)
+    if not job_urls:
+        raise HTTPException(status_code=404, detail="LLM could not find any job links on the page.")
 
-    # Step 3: Create the job entry using data from the analysis
-    new_job_data = JobCreate(
-        job_title=analysis_results.get("job_title", "Title not found"),
-        company_name=analysis_results.get("company_name", "Company not found"),
-        job_url=request.job_url,
-    )
-    db_job = create_job(db, job=new_job_data)
+    # --- Step 3: Batch-scrape all the individual job URLs ---
+    individual_job_contents = scraper_service.batch_scrape_job_urls(job_urls)
+    if not individual_job_contents:
+        raise HTTPException(status_code=500, detail="Failed to batch-scrape individual job URLs.")
 
-    # Step 4: Add the full description and analysis JSON to the record
-    db_job.job_description = scraped_content
-    db_job.analysis_results = analysis_results
+    created_jobs_in_db = []
+    # --- Step 4 & 5: Analyze each job and create a DB entry ---
+    for job_data in individual_job_contents:
+        job_markdown = job_data.get("markdown")
+        specific_job_url = job_data.get("metadata", {}).get("sourceURL")
+
+        if not job_markdown or not specific_job_url:
+            continue  # Skip if content or URL is missing
+
+        job_analysis = llm_service.analyze_job_description(job_markdown)
+
+        if not isinstance(job_analysis, dict):
+            continue  # Skip malformed analysis
+
+        new_job_data = JobCreate(
+            job_title=job_analysis.get("job_title", "Title not found"),
+            company_name=job_analysis.get("company_name", "Company not found"),
+            job_url=specific_job_url
+        )
+
+        # --- FIX: Convert HttpUrl to a string before creating the DB model ---
+        # Get the data as a dictionary from the Pydantic model
+        job_data_for_db = new_job_data.model_dump()
+        # Explicitly convert the 'job_url' field from an HttpUrl object to a string
+        job_data_for_db['job_url'] = str(job_data_for_db['job_url'])
+        job_data_for_db['job_description'] = job_markdown
+        # Now, create the SQLAlchemy model instance with the corrected data
+        db_job = DBJobModel(**job_data_for_db)
+
+        db_job.analysis_results = job_analysis
+        db.add(db_job)
+        created_jobs_in_db.append(db_job)
+
+    if not created_jobs_in_db:
+        raise HTTPException(
+            status_code=404,
+            detail="No valid jobs were found to be created from the analysis."
+        )
+
     db.commit()
-    db.refresh(db_job)
 
-    return db_job
+    for job in created_jobs_in_db:
+        db.refresh(job)
+
+    return created_jobs_in_db
