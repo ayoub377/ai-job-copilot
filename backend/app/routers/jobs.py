@@ -6,8 +6,17 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 
 from app.schemas.job import Job, JobCreate, JobUpdate
+from app.schemas.linkedin_job import (
+    LinkedInJobSearchRequest, 
+    LinkedInJobSearchResponse, 
+    LinkedInJobDetailsRequest, 
+    LinkedInJobDetailsResponse,
+    LinkedInJobResult,
+    LinkedInJobDetails
+)
 from app.core.db import get_db
 from app.services import scraper_service, llm_service
+from app.services.linkedin_scraper_service import search_linkedin_jobs, get_linkedin_job_details
 from app.crud.jobs import create_job, get_job, get_jobs, update_job, delete_job
 
 class ScrapeRequest(BaseModel):
@@ -56,6 +65,116 @@ def delete_existing_job(job_id: int, db: Session = Depends(get_db)):
     if db_job is None:
         raise HTTPException(status_code=404, detail="Job not found")
     return db_job
+
+
+@router.post("/linkedin/search", response_model=LinkedInJobSearchResponse, status_code=status.HTTP_200_OK)
+def search_linkedin_jobs_endpoint(request: LinkedInJobSearchRequest):
+    """
+    Search for jobs on LinkedIn using keywords and optional filters.
+    
+    This endpoint scrapes LinkedIn job listings based on the provided search criteria.
+    Results include job title, company, location, posting date, and job URLs.
+    """
+    try:
+        # Call the LinkedIn scraping service
+        jobs_data = search_linkedin_jobs(
+            keywords=request.keywords,
+            location=request.location or "",
+            max_results=request.max_results or 25,
+            experience_level=request.experience_level or "",
+            job_type=request.job_type or ""
+        )
+        
+        # Convert to Pydantic models
+        job_results = []
+        for job_data in jobs_data:
+            if job_data:  # Skip any None results
+                job_result = LinkedInJobResult(
+                    title=job_data.get("title", "N/A"),
+                    company=job_data.get("company", "N/A"),
+                    location=job_data.get("location", "N/A"),
+                    posted_date=job_data.get("posted_date", "N/A"),
+                    job_url=job_data.get("job_url", ""),
+                    description_preview=job_data.get("description_preview", "")
+                )
+                job_results.append(job_result)
+        
+        # Prepare search parameters for response
+        search_params = {
+            "keywords": request.keywords,
+            "location": request.location,
+            "max_results": request.max_results,
+            "experience_level": request.experience_level,
+            "job_type": request.job_type
+        }
+        
+        # Create response
+        response = LinkedInJobSearchResponse(
+            total_results=len(job_results),
+            search_parameters=search_params,
+            jobs=job_results,
+            success=True,
+            message=f"Successfully found {len(job_results)} jobs matching your criteria"
+        )
+        
+        return response
+        
+    except Exception as e:
+        # Handle errors gracefully
+        error_response = LinkedInJobSearchResponse(
+            total_results=0,
+            search_parameters={"keywords": request.keywords},
+            jobs=[],
+            success=False,
+            message=f"Error searching LinkedIn jobs: {str(e)}"
+        )
+        return error_response
+
+
+@router.post("/linkedin/details", response_model=LinkedInJobDetailsResponse, status_code=status.HTTP_200_OK)
+def get_linkedin_job_details_endpoint(request: LinkedInJobDetailsRequest):
+    """
+    Get detailed information for a specific LinkedIn job posting.
+    
+    This endpoint scrapes detailed job information including the full job description
+    from a LinkedIn job posting URL.
+    """
+    try:
+        # Call the LinkedIn job details service
+        job_details_data = get_linkedin_job_details(str(request.job_url))
+        
+        if job_details_data:
+            # Convert to Pydantic model
+            job_details = LinkedInJobDetails(
+                title=job_details_data.get("title", "N/A"),
+                company=job_details_data.get("company", "N/A"),
+                location=job_details_data.get("location", "N/A"),
+                description=job_details_data.get("description", "N/A"),
+                job_url=job_details_data.get("job_url", str(request.job_url))
+            )
+            
+            response = LinkedInJobDetailsResponse(
+                job_details=job_details,
+                success=True,
+                message="Successfully retrieved job details"
+            )
+        else:
+            response = LinkedInJobDetailsResponse(
+                job_details=None,
+                success=False,
+                message="Could not retrieve job details from the provided URL"
+            )
+        
+        return response
+        
+    except Exception as e:
+        # Handle errors gracefully
+        error_response = LinkedInJobDetailsResponse(
+            job_details=None,
+            success=False,
+            message=f"Error retrieving LinkedIn job details: {str(e)}"
+        )
+        return error_response
 
 
 @router.post("/scrape", response_model=Job, status_code=status.HTTP_201_CREATED)
