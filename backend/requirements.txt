@@ -11,3 +11,6 @@ python-dotenv~=1.1.1
 requests
 firecrawl~=2.16.3
 openai~=1.98.0
+selenium~=4.16.0
+beautifulsoup4~=4.12.2
+webdriver-manager~=4.0.1
